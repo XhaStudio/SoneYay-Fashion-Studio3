@@ -5,4 +5,4 @@ chmod +x cloudflared
 # Tunnel ကို background မှာ run ပြီး URL ကို log file ထဲ ရေးမယ်
 ./cloudflared tunnel --url http://localhost:3095 --logfile tunnel.log &
 
-python bot.py
+python app.py
