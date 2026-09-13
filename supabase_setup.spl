@@ -1,0 +1,21 @@
+-- Run this in the Supabase SQL Editor (choose "Run and enable RLS" when prompted).
+
+create table products (
+  id bigint primary key,
+  name text not null,
+  description text,
+  price numeric not null default 0,
+  stock integer not null default 0,
+  photos jsonb not null default '[]'::jsonb,
+  video text,
+  created_at timestamptz not null default now()
+);
+
+-- Allows the web app (using the public/anon key) to read products.
+-- Writes still require the service_role key, which the bot uses and which
+-- bypasses RLS entirely, so this policy does not affect the bot.
+create policy "Public can read products"
+on products
+for select
+to anon
+using (true);
