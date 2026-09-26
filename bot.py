@@ -24,11 +24,11 @@ Setup:
        Browsers refuse to call plain http:// from an https:// page.
 """
 
+import asyncio
 import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -43,6 +43,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,9 +57,7 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 SHOP_URL = os.environ.get(
     "SHOP_URL", "https://xhastudio.github.io/SoneYay-Fashion-Studio2/"
 )
-# Render (and most PaaS hosts) inject PORT automatically and require the app
-# to bind to it; API_PORT is kept as a fallback for local/manual runs.
-API_PORT = int(os.environ.get("PORT", os.environ.get("API_PORT", "8080")))
+API_PORT = int(os.environ.get("API_PORT", "8080"))
 # Comma-separated list of origins allowed to call the API. Use "*" while
 # testing; lock this to your real shop origin before going live.
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
@@ -75,11 +75,10 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # In-memory order tracking
 # ---------------------------------------------------------------------------
 # NOTE: this resets whenever the bot restarts. Swap for a real database
-# (Supabase table/Postgres/etc.) if you need orders to survive restarts.
+# (SQLite/Postgres/etc.) if you need orders to survive restarts.
 @dataclass
 class PendingOrder:
     order_id: int
@@ -87,22 +86,10 @@ class PendingOrder:
     username: str
     order: dict
     status: str = "pending_review"  # pending_review | approved | rejected
-    # Tracks which Telegram messages for this order have actually been sent,
-    # so a retried /api/order call for the same client_order_id only retries
-    # the step that failed instead of re-sending everything (which is what
-    # caused duplicate customer messages before).
-    customer_notified: bool = False
-    admin_notified: bool = False
 
 
 ORDERS: dict[int, PendingOrder] = {}
 _next_order_id = 1
-
-# Maps a client-generated request id -> the order_id it produced, so that a
-# retried /api/order call (e.g. after the customer's connection dropped
-# before they saw our response) doesn't create a second order / send a
-# duplicate Telegram notification for the same checkout attempt.
-SEEN_CLIENT_ORDER_IDS: dict[str, int] = {}
 
 
 def _new_order_id() -> int:
@@ -123,16 +110,15 @@ def payment_label(code: str) -> str:
 def format_order_text(order: dict, header: str = "🛍️ Order Confirmed!") -> str:
     lines = [f"{header}\n"]
     for item in order.get("items", []):
-        lines.append(f"Choice: {item.get('meta') or '-'}")
-        lines.append(f"Name: {item.get('name', '-')}")
-        lines.append(f"Amount: {item.get('quantity', '-')}")
-        lines.append("")
+        meta = f" ({item['meta']})" if item.get("meta") else ""
+        lines.append(f"- {item['name']}{meta} x{item['quantity']}")
     total = order.get("total", 0)
+    lines.append(f"\nTotal: {total:,.0f} ကျပ်")
     lines.append(f"Payment: {payment_label(order.get('payment', ''))}")
     customer = order.get("customer", {})
+    lines.append(f"Name: {customer.get('name', '-')}")
     lines.append(f"Phone: {customer.get('phone', '-')}")
     lines.append(f"Address: {customer.get('address', '-')}")
-    lines.append(f"Total: {total:,.0f} ကျပ်")
     return "\n".join(lines)
 
 
@@ -160,7 +146,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     ]
     await update.message.reply_text(
-        "Welcome to SoneYay Fashion Studio! Click below to browse products:",
+        "Welcome to our Fashion Shop! Click below to browse products:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -232,49 +218,20 @@ async def api_order(request: web.Request) -> web.Response:
         telegram_user_id = int(data["telegram_user_id"])
         username = data.get("username") or str(telegram_user_id)
         photo_field = data.get("photo")  # aiohttp FileField, or None
-        client_order_id = data.get("client_order_id") or None
     except Exception:
         logger.exception("Bad /api/order payload")
         return web.json_response({"ok": False, "error": "bad_request"}, status=400)
 
-    # If the web app already sent this exact checkout attempt (e.g. it's
-    # retrying after "Failed to fetch"), reuse the same order instead of
-    # creating a new one. We still fall through below so that any step
-    # (customer message / admin message) that didn't actually succeed last
-    # time gets retried — but customer_notified/admin_notified stop us from
-    # re-sending anything that already went out.
-    if client_order_id and client_order_id in SEEN_CLIENT_ORDER_IDS:
-        order_id = SEEN_CLIENT_ORDER_IDS[client_order_id]
-        pending = ORDERS[order_id]
-    else:
-        order_id = _new_order_id()
-        pending = PendingOrder(order_id, telegram_user_id, username, order)
-        ORDERS[order_id] = pending
-        if client_order_id:
-            SEEN_CLIENT_ORDER_IDS[client_order_id] = order_id
-        logger.info(
-            "New order #%s from %s (%s): %s",
-            order_id, username, telegram_user_id, order.get("payment", "COD"),
-        )
-
+    order_id = _new_order_id()
     payment = order.get("payment", "COD")
-
-    if photo_field is not None and not hasattr(photo_field, "file"):
-        # Helps diagnose "admin gets text instead of the photo" reports:
-        # this fires if the "photo" field arrived as a plain string/bytes
-        # instead of an uploaded file (e.g. wrong field name, or the
-        # request body was cut off by aiohttp's max body size).
-        logger.warning(
-            "Order #%s: 'photo' field present but not a file upload (type=%s)",
-            order_id, type(photo_field),
-        )
+    pending = PendingOrder(order_id, telegram_user_id, username, order)
+    ORDERS[order_id] = pending
+    logger.info("New order #%s from %s (%s): %s", order_id, username, telegram_user_id, payment)
 
     try:
         if payment == "COD":
-            if not pending.customer_notified:
-                await bot.send_message(chat_id=telegram_user_id, text=format_order_text(order))
-                pending.customer_notified = True
-            if ADMIN_CHAT_ID and not pending.admin_notified:
+            await bot.send_message(chat_id=telegram_user_id, text=format_order_text(order))
+            if ADMIN_CHAT_ID:
                 await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
@@ -283,28 +240,24 @@ async def api_order(request: web.Request) -> web.Response:
                     ),
                     reply_markup=_review_keyboard(order_id),
                 )
-                pending.admin_notified = True
         else:
             wallet_name = KBZPAY_NAME if payment == "KBZPay" else WAVEPAY_NAME
             wallet_number = KBZPAY_NUMBER if payment == "KBZPay" else WAVEPAY_NUMBER
-            if not pending.customer_notified:
-                await bot.send_message(
-                    chat_id=telegram_user_id,
-                    text=(
-                        f"{format_order_text(order, header='🧾 Order Received — Payment Pending')}\n\n"
-                        f"Transferred to: {payment}: {wallet_name} — {wallet_number}\n\n"
-                        f"Our team will review your payment and confirm shortly."
-                    ),
-                )
-                pending.customer_notified = True
+            await bot.send_message(
+                chat_id=telegram_user_id,
+                text=(
+                    f"{format_order_text(order, header='🧾 Order Received — Payment Pending')}\n\n"
+                    f"Transferred to: {payment}: {wallet_name} — {wallet_number}\n\n"
+                    f"Our team will review your payment and confirm shortly."
+                ),
+            )
             caption = (
                 f"#{order_id} New {payment} order from @{username} (id: {telegram_user_id})\n\n"
                 + format_order_text(pending.order, header="🧾 Order Awaiting Approval")
             )
-            if ADMIN_CHAT_ID and not pending.admin_notified:
+            if ADMIN_CHAT_ID:
                 if photo_field is not None and hasattr(photo_field, "file"):
                     photo_bytes = photo_field.file.read()
-                    logger.info("Order #%s: forwarding screenshot (%d bytes) to admin", order_id, len(photo_bytes))
                     await bot.send_photo(
                         chat_id=ADMIN_CHAT_ID,
                         photo=photo_bytes,
@@ -317,30 +270,16 @@ async def api_order(request: web.Request) -> web.Response:
                         text=caption + "\n\n(No screenshot attached)",
                         reply_markup=_review_keyboard(order_id),
                     )
-                pending.admin_notified = True
     except Exception as exc:
         logger.exception("Failed to deliver order #%s to Telegram", order_id)
-        # Note: we deliberately do NOT pop client_order_id here anymore.
-        # Keeping it means a retry of this same checkout attempt will
-        # resume from whichever step failed, instead of being treated as
-        # a brand new order (which is what caused duplicate messages).
         return web.json_response({"ok": False, "error": str(exc)}, status=502)
 
     return web.json_response({"ok": True, "order_id": order_id})
 
 
-async def health(request: web.Request) -> web.Response:
-    # Simple 200 for Render's (or any PaaS's) health check / uptime pings.
-    return web.json_response({"ok": True})
-
-
 async def start_web_server(application: Application) -> None:
-    # Default aiohttp request-body limit is only 1 MB, which many phone
-    # payment-screenshot uploads exceed. Raise it so the KBZPay/WavePay
-    # screenshot doesn't get rejected before it ever reaches api_order.
-    app = web.Application(middlewares=[cors_middleware], client_max_size=20 * 1024 * 1024)
+    app = web.Application(middlewares=[cors_middleware])
     app["bot"] = application.bot
-    app.router.add_get("/", health)
     app.router.add_post("/api/order", api_order)
     app.router.add_route("OPTIONS", "/api/order", lambda r: web.Response())
 
@@ -358,6 +297,15 @@ async def start_web_server(application: Application) -> None:
 def main() -> None:
     if not BOT_TOKEN:
         raise SystemExit("Please set BOT_TOKEN in your .env file.")
+
+    # Python 3.14 removed the implicit "create a loop if none exists"
+    # behavior that asyncio.get_event_loop() used to fall back on, and
+    # python-telegram-bot 21.x's run_polling() relies on that fallback.
+    # Create and set the loop explicitly so it works on 3.14 too.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     application = (
         Application.builder().token(BOT_TOKEN).post_init(start_web_server).build()
