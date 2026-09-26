@@ -1,27 +1,28 @@
 """
-Fashion Shop Telegram Bot
+ဖက်ရှင်ဆိုင် Telegram Bot
 --------------------------
-- /start           -> welcome message + button that opens the shop Web App
-- /whoami          -> replies with your chat ID (use this to set ADMIN_CHAT_ID)
-- HTTP API         -> the Web App calls POST /api/order directly (fetch, not
-                       Telegram's sendData) so the Mini App window can stay
-                       open and show its own "submitted" animation instead of
-                       being force-closed by Telegram.
-                         * COD orders are confirmed immediately and forwarded
-                           to the admin.
-                         * KBZPay/WavePay orders (with an optional screenshot
-                           upload) are forwarded to the admin for approval.
-- Approve/Reject   -> admin taps a button, customer gets notified, and the
-                       order message is updated.
+- /start           -> ကြိုဆိုစာ + ဆိုင်ရဲ့ Web App ကိုဖွင့်ပေးမယ့် ခလုတ်
+- /whoami          -> chat ID ကို ပြန်ပြောပေးမယ် (ADMIN_CHAT_ID သတ်မှတ်ဖို့ သုံးပါ)
+- HTTP API         -> Web App ကနေ POST /api/order ကို တိုက်ရိုက် ခေါ်ပါတယ် (fetch
+                       သုံးထားပါတယ်၊ Telegram ရဲ့ sendData မဟုတ်ပါ) — ဒါမှသာ Mini App
+                       window က ပိတ်မသွားဘဲ "ပို့ပြီးပါပြီ" animation ကို
+                       မိမိကိုယ်တိုင် ပြနိုင်မှာဖြစ်ပါတယ် (Telegram က အလိုအလျောက်
+                       ပိတ်ခံရမည့်အစား)။
+                         * COD အော်ဒါများကို ချက်ချင်း အတည်ပြုပြီး admin ဆီ
+                           ပို့ပေးပါတယ်။
+                         * KBZPay/WavePay အော်ဒါများ (screenshot ပါလျှင်ပါ) ကို
+                           admin ဆီ approve/reject လုပ်ဖို့ ပို့ပေးပါတယ်။
+- Approve/Reject   -> admin က ခလုတ်နှိပ်လိုက်ရင် customer ဆီ အကြောင်းကြားပြီး
+                       order message ကို update လုပ်ပေးပါတယ်။
 
-Setup:
-    1. pip install -r requirements.txt
-    2. Fill in the .env file (BOT_TOKEN, ADMIN_CHAT_ID, wallet details, API_PORT)
-    3. Run: python bot.py
-    4. Make sure API_PORT is reachable over HTTPS from the internet (e.g. via
-       a reverse proxy/nginx + TLS cert, or your host's built-in HTTPS proxy)
-       and set that public URL as API_BASE_URL in the web app's app.js.
-       Browsers refuse to call plain http:// from an https:// page.
+Setup လုပ်နည်း:
+    ၁. pip install -r requirements.txt
+    ၂. .env ဖိုင်ကို ဖြည့်ပါ (BOT_TOKEN, ADMIN_CHAT_ID, wallet အချက်အလက်များ, API_PORT)
+    ၃. Run ရန်: python bot.py
+    ၄. API_PORT ကို internet ပေါ်က HTTPS နဲ့ ဝင်ရောက်နိုင်အောင် စီစဉ်ပါ (ဥပမာ
+       reverse proxy/nginx + TLS certificate, ဒါမှမဟုတ် host ရဲ့ built-in HTTPS
+       proxy) ပြီးရင် အဲဒီ public URL ကို web app ရဲ့ app.js ထဲက API_BASE_URL
+       မှာ ထည့်ပါ။ Browser တွေက https:// page ကနေ http:// ကို ခေါ်လို့ မရပါ။
 """
 
 import asyncio
@@ -48,7 +49,7 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------------------------
-# Config
+# ချိန်ညှိချက်များ (Config)
 # ---------------------------------------------------------------------------
 load_dotenv()
 
@@ -57,9 +58,14 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 SHOP_URL = os.environ.get(
     "SHOP_URL", "https://xhastudio.github.io/SoneYay-Fashion-Studio2/"
 )
-API_PORT = int(os.environ.get("API_PORT", "8080"))
-# Comma-separated list of origins allowed to call the API. Use "*" while
-# testing; lock this to your real shop origin before going live.
+# Render (နဲ့ PaaS host အများစု) က public port ကို PORT ဆိုတဲ့ env var ကနေ
+# အလိုအလျောက် သတ်မှတ်ပေးပါတယ် — app က ဒီ port ကိုပဲ listen လုပ်ရပါမယ်
+# (fixed number မသုံးရပါ) — ဒါမှ public https://xxxx.onrender.com URL က
+# တကယ် ရောက်နိုင်မှာပါ။
+API_PORT = int(os.environ.get("PORT", os.environ.get("API_PORT", "8080")))
+# API ကို ခေါ်ခွင့်ပြုမယ့် origin များ (comma-separated)။ စမ်းနေတုန်း "*"
+# ထားလို့ရပေမယ့် တကယ် launch လုပ်ခင်မှာ မင်းရဲ့ shop origin အစစ်ကို
+# ကန့်သတ်ပေးပါ။
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
 
 KBZPAY_NAME = os.environ.get("KBZPAY_NAME", "")
@@ -75,10 +81,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# In-memory order tracking
+# Order များကို memory ထဲမှာ ခေတ္တသိမ်းထားခြင်း
 # ---------------------------------------------------------------------------
-# NOTE: this resets whenever the bot restarts. Swap for a real database
-# (SQLite/Postgres/etc.) if you need orders to survive restarts.
+# မှတ်ချက်: bot ကို restart ချလိုက်တိုင်း ဒီ data တွေ ပျောက်သွားပါမယ်။
+# Restart ပြီးလည်း order history ကို ဆက်ထားချင်ရင် SQLite/Postgres လို
+# database အစစ်တစ်ခုခုနဲ့ အစားထိုးရပါလိမ့်မယ်။
 @dataclass
 class PendingOrder:
     order_id: int
@@ -101,24 +108,24 @@ def _new_order_id() -> int:
 
 def payment_label(code: str) -> str:
     return {
-        "COD": "Cash on Delivery (COD)",
+        "COD": "ငွေချေပြီးမှလက်ခံရန် (COD)",
         "KBZPay": "KBZPay",
         "WavePay": "WavePay",
     }.get(code, code or "-")
 
 
-def format_order_text(order: dict, header: str = "🛍️ Order Confirmed!") -> str:
+def format_order_text(order: dict, header: str = "🛍️ မှာယူမှု အတည်ပြုပြီး!") -> str:
     lines = [f"{header}\n"]
     for item in order.get("items", []):
         meta = f" ({item['meta']})" if item.get("meta") else ""
         lines.append(f"- {item['name']}{meta} x{item['quantity']}")
     total = order.get("total", 0)
-    lines.append(f"\nTotal: {total:,.0f} ကျပ်")
-    lines.append(f"Payment: {payment_label(order.get('payment', ''))}")
+    lines.append(f"\nစုစုပေါင်း: {total:,.0f} ကျပ်")
+    lines.append(f"ငွေပေးချေမှု: {payment_label(order.get('payment', ''))}")
     customer = order.get("customer", {})
-    lines.append(f"Name: {customer.get('name', '-')}")
-    lines.append(f"Phone: {customer.get('phone', '-')}")
-    lines.append(f"Address: {customer.get('address', '-')}")
+    lines.append(f"အမည်: {customer.get('name', '-')}")
+    lines.append(f"ဖုန်းနံပါတ်: {customer.get('phone', '-')}")
+    lines.append(f"လိပ်စာ: {customer.get('address', '-')}")
     return "\n".join(lines)
 
 
@@ -126,15 +133,15 @@ def _review_keyboard(order_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Approve", callback_data=f"approve:{order_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject:{order_id}"),
+                InlineKeyboardButton("✅ အတည်ပြုမည်", callback_data=f"approve:{order_id}"),
+                InlineKeyboardButton("❌ ပယ်ချမည်", callback_data=f"reject:{order_id}"),
             ]
         ]
     )
 
 
 # ---------------------------------------------------------------------------
-# Telegram handlers
+# Telegram handler များ
 # ---------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
@@ -146,13 +153,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     ]
     await update.message.reply_text(
-        "Welcome to our Fashion Shop! Click below to browse products:",
+        "ကျွန်ုပ်တို့ ဖက်ရှင်ဆိုင်မှ ကြိုဆိုပါတယ်! ပစ္စည်းများကြည့်ရှုရန် အောက်က ခလုတ်ကို နှိပ်ပါ:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"Your chat ID is: {update.effective_chat.id}")
+    await update.message.reply_text(f"မင်းရဲ့ chat ID က: {update.effective_chat.id}")
 
 
 async def handle_review_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -163,28 +170,28 @@ async def handle_review_decision(update: Update, context: ContextTypes.DEFAULT_T
     pending = ORDERS.get(order_id)
 
     if pending is None:
-        await query.edit_message_text("This order no longer exists.")
+        await query.edit_message_text("ဒီ order ကို ရှာမတွေ့တော့ပါ။")
         return
 
     if action == "approve":
         pending.status = "approved"
         await context.bot.send_message(
             chat_id=pending.user_id,
-            text=f"✅ Your order #{order_id} has been approved! We'll get it shipped soon.",
+            text=f"✅ မင်းရဲ့ order #{order_id} ကို အတည်ပြုပြီးပါပြီ! မကြာမီ ပို့ဆောင်ပေးပါမယ်။",
         )
-        result_text = f"#{order_id} ✅ Approved"
+        result_text = f"#{order_id} ✅ အတည်ပြုပြီး"
     else:
         pending.status = "rejected"
         await context.bot.send_message(
             chat_id=pending.user_id,
             text=(
-                f"❌ Your order #{order_id} could not be confirmed. "
-                f"Please contact us or try checking out again."
+                f"❌ မင်းရဲ့ order #{order_id} ကို အတည်ပြု၍မရပါ။ "
+                f"ကျေးဇူးပြု၍ ဆက်သွယ်ပါ (သို့) ပြန်လည် မှာယူကြည့်ပါ။"
             ),
         )
-        result_text = f"#{order_id} ❌ Rejected"
+        result_text = f"#{order_id} ❌ ပယ်ချပြီး"
 
-    # Update the admin's message (works for both text and photo captions).
+    # Admin ရဲ့ message ကို update လုပ်ခြင်း (text နှင့် photo caption နှစ်မျိုးစလုံးအတွက် အလုပ်လုပ်ပါတယ်)။
     if query.message.photo:
         await query.edit_message_caption(
             caption=f"{query.message.caption}\n\n{result_text}", reply_markup=None
@@ -196,7 +203,7 @@ async def handle_review_decision(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ---------------------------------------------------------------------------
-# HTTP API (called directly from the Web App via fetch, not sendData)
+# HTTP API (Web App ကနေ sendData မဟုတ်ဘဲ fetch နဲ့ တိုက်ရိုက် ခေါ်တာပါ)
 # ---------------------------------------------------------------------------
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
@@ -217,16 +224,16 @@ async def api_order(request: web.Request) -> web.Response:
         order = json.loads(data["order"])
         telegram_user_id = int(data["telegram_user_id"])
         username = data.get("username") or str(telegram_user_id)
-        photo_field = data.get("photo")  # aiohttp FileField, or None
+        photo_field = data.get("photo")  # aiohttp FileField, ဒါမှမဟုတ် None
     except Exception:
-        logger.exception("Bad /api/order payload")
+        logger.exception("/api/order ကို data ပုံစံမှားနေတယ်")
         return web.json_response({"ok": False, "error": "bad_request"}, status=400)
 
     order_id = _new_order_id()
     payment = order.get("payment", "COD")
     pending = PendingOrder(order_id, telegram_user_id, username, order)
     ORDERS[order_id] = pending
-    logger.info("New order #%s from %s (%s): %s", order_id, username, telegram_user_id, payment)
+    logger.info("Order အသစ် #%s လာသည် — %s (%s): %s", order_id, username, telegram_user_id, payment)
 
     try:
         if payment == "COD":
@@ -235,7 +242,7 @@ async def api_order(request: web.Request) -> web.Response:
                 await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
-                        f"#{order_id} New COD order from @{username} (id: {telegram_user_id})\n\n"
+                        f"#{order_id} COD Order အသစ် — @{username} (id: {telegram_user_id})\n\n"
                         + format_order_text(order)
                     ),
                     reply_markup=_review_keyboard(order_id),
@@ -246,14 +253,14 @@ async def api_order(request: web.Request) -> web.Response:
             await bot.send_message(
                 chat_id=telegram_user_id,
                 text=(
-                    f"{format_order_text(order, header='🧾 Order Received — Payment Pending')}\n\n"
-                    f"Transferred to: {payment}: {wallet_name} — {wallet_number}\n\n"
-                    f"Our team will review your payment and confirm shortly."
+                    f"{format_order_text(order, header='🧾 Order လက်ခံရရှိပြီး — ငွေပေးချေမှု စောင့်ဆိုင်းနေသည်')}\n\n"
+                    f"လွှဲပေးရမည့် အကောင့်: {payment}: {wallet_name} — {wallet_number}\n\n"
+                    f"ကျွန်ုပ်တို့ အသင်းက ငွေလွှဲမှုကို စစ်ဆေးပြီး မကြာမီ အတည်ပြုပေးပါမယ်။"
                 ),
             )
             caption = (
-                f"#{order_id} New {payment} order from @{username} (id: {telegram_user_id})\n\n"
-                + format_order_text(pending.order, header="🧾 Order Awaiting Approval")
+                f"#{order_id} {payment} Order အသစ် — @{username} (id: {telegram_user_id})\n\n"
+                + format_order_text(pending.order, header="🧾 အတည်ပြုရန် စောင့်နေသော Order")
             )
             if ADMIN_CHAT_ID:
                 if photo_field is not None and hasattr(photo_field, "file"):
@@ -267,19 +274,24 @@ async def api_order(request: web.Request) -> web.Response:
                 else:
                     await bot.send_message(
                         chat_id=ADMIN_CHAT_ID,
-                        text=caption + "\n\n(No screenshot attached)",
+                        text=caption + "\n\n(Screenshot ပါမလာပါ)",
                         reply_markup=_review_keyboard(order_id),
                     )
     except Exception as exc:
-        logger.exception("Failed to deliver order #%s to Telegram", order_id)
+        logger.exception("Order #%s ကို Telegram ဆီ ပို့လို့မရပါ", order_id)
         return web.json_response({"ok": False, "error": str(exc)}, status=502)
 
     return web.json_response({"ok": True, "order_id": order_id})
 
 
+async def health_check(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True, "service": "fashion-shop-bot"})
+
+
 async def start_web_server(application: Application) -> None:
     app = web.Application(middlewares=[cors_middleware])
     app["bot"] = application.bot
+    app.router.add_get("/", health_check)
     app.router.add_post("/api/order", api_order)
     app.router.add_route("OPTIONS", "/api/order", lambda r: web.Response())
 
@@ -287,8 +299,8 @@ async def start_web_server(application: Application) -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", API_PORT)
     await site.start()
-    application.bot_data["web_runner"] = runner  # keep a reference alive
-    logger.info("HTTP API listening on 0.0.0.0:%s", API_PORT)
+    application.bot_data["web_runner"] = runner  # reference ကို အသက်ဝင်နေအောင် ထားရန်
+    logger.info("HTTP API ကို 0.0.0.0:%s မှာ listen လုပ်နေပါပြီ", API_PORT)
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +308,13 @@ async def start_web_server(application: Application) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     if not BOT_TOKEN:
-        raise SystemExit("Please set BOT_TOKEN in your .env file.")
+        raise SystemExit("ကျေးဇူးပြု၍ .env ဖိုင်ထဲမှာ BOT_TOKEN ကို ထည့်ပါ။")
 
-    # Python 3.14 removed the implicit "create a loop if none exists"
-    # behavior that asyncio.get_event_loop() used to fall back on, and
-    # python-telegram-bot 21.x's run_polling() relies on that fallback.
-    # Create and set the loop explicitly so it works on 3.14 too.
+    # Python 3.14 က "loop မရှိရင် အလိုအလျောက် ဖန်တီးပေးမယ်" ဆိုတဲ့ အရင်
+    # asyncio.get_event_loop() ရဲ့ fallback behavior ကို ဖြုတ်လိုက်ပါတယ်။
+    # python-telegram-bot 21.x ရဲ့ run_polling() က ဒီ fallback ကို
+    # အားကိုးနေတာမို့ — 3.14 မှာလည်း အလုပ်ဖြစ်အောင် loop ကို ကိုယ်တိုင်
+    # ဖန်တီးပြီး သတ်မှတ်ပေးလိုက်ပါတယ်။
     try:
         asyncio.get_event_loop()
     except RuntimeError:
@@ -317,7 +330,7 @@ def main() -> None:
         CallbackQueryHandler(handle_review_decision, pattern=r"^(approve|reject):\d+$")
     )
 
-    logger.info("Bot starting...")
+    logger.info("Bot စတင်နေပါပြီ...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
